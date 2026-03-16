@@ -88,7 +88,6 @@ main.py          — ponto de entrada CLI, orquestra o fluxo completo
 auth.py          — automação de browser (login gov.br + troca de perfil e-CAC)
 requerimento.py  — todas as chamadas de API REST após a autenticação
 config.py        — dataclass com parâmetros da execução
-captcha.py       — integração Capsolver (não utilizada atualmente)
 requirements.txt — dependências Python
 docs/
   requests.md    — documentação detalhada de todas as requisições
