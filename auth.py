@@ -11,8 +11,11 @@ import re
 import sys
 import base64
 import json as _json
+import logging
 from pathlib import Path
 from patchright.async_api import async_playwright, Page, BrowserContext
+
+log = logging.getLogger("auth")
 
 ECAC_URL = "https://www3.cav.receita.fazenda.gov.br/contribuinte"
 ECAC_LOGIN_URL = "https://www3.cav.receita.fazenda.gov.br/autenticacao"
@@ -55,18 +58,18 @@ def _jwt_context(token: str) -> tuple[str, str]:
 
 
 async def _click_govbr_button(page: Page) -> None:
-    print("[auth] Waiting for e-CAC login page...")
+    log.debug("Waiting for e-CAC login page...")
     await page.wait_for_load_state("domcontentloaded")
     govbr_btn = page.locator('input[type="image"][alt="Acesso Gov BR"]')
     await govbr_btn.wait_for(state="visible", timeout=10_000)
     await govbr_btn.click()
-    print("[auth] Gov BR button clicked.")
+    log.debug("Gov BR button clicked.")
 
 
 async def _login_govbr(page: Page, cpf: str, password: str) -> None:
-    print(f"[auth] Waiting for redirect to gov.br (up to {CAPTCHA_TIMEOUT_MS // 1000}s)...")
+    log.info("Aguardando redirecionamento para gov.br SSO...")
     await page.wait_for_url(f"**{GOVBR_SSO_HOST}**", timeout=CAPTCHA_TIMEOUT_MS)
-    print("[auth] Redirected to gov.br SSO.")
+    log.debug("Redirected to gov.br SSO.")
 
     await page.wait_for_selector('input[name="accountId"]', timeout=10_000)
     await page.type('input[name="accountId"]', re.sub(r"\D", "", cpf), delay=80)
@@ -75,7 +78,7 @@ async def _login_govbr(page: Page, cpf: str, password: str) -> None:
     await page.wait_for_selector('input[name="password"]', timeout=10_000)
     await page.type('input[name="password"]', password, delay=80)
     await page.click('button[type="submit"]')
-    print("[auth] Credentials submitted, waiting for redirect to e-CAC...")
+    log.debug("Credentials submitted.")
 
 
 async def _switch_cnpj_profile(page: Page, cnpj: str) -> str | None:
@@ -84,12 +87,9 @@ async def _switch_cnpj_profile(page: Page, cnpj: str) -> str | None:
     Returns the REPRESENTANTE_LEGAL SISEN_TOKEN if captured from a redirect
     response Set-Cookie header, or None if not intercepted (fall back to cookies).
     """
-    print(f"[auth] Switching profile to CNPJ {cnpj}...")
+    log.info("Alternando perfil para CNPJ %s...", _format_cnpj(cnpj))
     await page.wait_for_url("**cav.receita.fazenda.gov.br**", timeout=20_000)
 
-    # After the profile switch, cav sends an HTTP redirect (302) to www3 with a
-    # special token parameter in the URL. Intercepting that Location URL lets us
-    # navigate to it explicitly even if the browser didn't follow it automatically.
     redirect_urls: list[str] = []
     token_cookies: list[str] = []
 
@@ -97,16 +97,15 @@ async def _switch_cnpj_profile(page: Page, cnpj: str) -> str | None:
         if response.status in (301, 302, 303, 307, 308):
             location = response.headers.get("location", "")
             if "www3.cav.receita.fazenda.gov.br" in location:
-                print(f"[auth] Captured www3 redirect: {location[:120]}")
+                log.debug("Captured www3 redirect: %s", location[:120])
                 redirect_urls.append(location)
-        # Also try to grab SISEN_TOKEN from Set-Cookie (belt-and-suspenders)
         raw = response.headers.get("set-cookie", "")
         if "SISEN_TOKEN" in raw:
             m = re.search(r"SISEN_TOKEN=([^;,\s]+)", raw)
             if m:
                 tok = m.group(1)
                 papel, _ = _jwt_context(tok)
-                print(f"[auth] Intercepted SISEN_TOKEN from Set-Cookie (papel={papel})")
+                log.debug("Intercepted SISEN_TOKEN from Set-Cookie (papel=%s)", papel)
                 if papel == "REPRESENTANTE_LEGAL":
                     token_cookies.append(tok)
 
@@ -117,47 +116,39 @@ async def _switch_cnpj_profile(page: Page, cnpj: str) -> str | None:
     await page.type("#txtNIPapel", re.sub(r"\D", "", cnpj), delay=80)
     await page.click('input.submit[value="Alterar"]')
 
-    print(f"[auth] Profile captcha triggered — waiting up to {CAPTCHA_TIMEOUT_MS // 1000}s...")
+    log.info("Resolvendo captcha do perfil (aguarde)...")
 
-    # Wait for captcha + switch. The SPA may redirect to www3 on its own.
     try:
         await page.wait_for_url("**www3.cav.receita.fazenda.gov.br**", timeout=CAPTCHA_TIMEOUT_MS)
         await page.wait_for_load_state("networkidle", timeout=20_000)
         page.remove_listener("response", _on_response)
-        print(f"[auth] Profile switched to CNPJ {_format_cnpj(cnpj)} (natural redirect to www3)")
-        return None  # SISEN_TOKEN in cookies will be REPRESENTANTE_LEGAL
+        log.debug("Profile switched via natural redirect to www3.")
+        return None
 
     except Exception:
-        # Auto-redirect didn't happen — browser stayed on cav
         pass
 
     page.remove_listener("response", _on_response)
 
-    # If we captured an HTTP 302 redirect URL to www3, follow it to trigger token exchange
     if redirect_urls:
-        target = redirect_urls[-1]
-        print(f"[auth] Following intercepted www3 redirect...")
+        log.debug("Following intercepted www3 redirect...")
         try:
-            await page.goto(target, wait_until="commit", timeout=30_000)
+            await page.goto(redirect_urls[-1], wait_until="commit", timeout=30_000)
         except Exception:
             pass
         await page.wait_for_load_state("networkidle", timeout=20_000)
-        print(f"[auth] Profile switched to CNPJ {_format_cnpj(cnpj)} (via intercepted redirect)")
         return None
 
-    # If we grabbed the token directly from Set-Cookie, return it
     if token_cookies:
-        print(f"[auth] Profile switched to CNPJ {_format_cnpj(cnpj)} (token from Set-Cookie)")
+        log.debug("Token captured from Set-Cookie.")
         return token_cookies[-1]
 
-    # Last resort: navigate to www3 directly (SISEN_TOKEN may still be TITULAR)
-    print(f"[auth] WARNING: no www3 redirect captured — navigating directly (token may be TITULAR)")
+    log.debug("No www3 redirect captured — navigating directly.")
     try:
         await page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
     except Exception:
         pass
     await page.wait_for_load_state("networkidle", timeout=20_000)
-    print(f"[auth] Profile switched to CNPJ {_format_cnpj(cnpj)}")
     return None
 
 
@@ -192,7 +183,7 @@ async def get_auth_session(
         )
         page = await context.new_page()
 
-        print(f"[auth] Opening e-CAC login: {ECAC_LOGIN_URL}")
+        log.info("Abrindo e-CAC: %s", ECAC_LOGIN_URL)
         await page.goto(ECAC_LOGIN_URL)
 
         await _click_govbr_button(page)
@@ -206,10 +197,10 @@ async def get_auth_session(
         await context.close()
 
     papel, representando_ni = _jwt_context(token)
-    print(f"[auth] Token context — papel={papel}, representando={representando_ni} (tipoNi={'PJ' if representando_ni != re.sub(r'\\D','',cpf) else 'PF'})")
+    log.debug("Token context — papel=%s, representando=%s", papel, representando_ni)
+    log.debug("Full token (length=%d):\n%s", len(token), token)
 
     if papel != "REPRESENTANTE_LEGAL":
-        print("[auth] WARNING: token is not in CNPJ context — profile switch may not have completed.")
+        log.warning("Token não está em contexto CNPJ (papel=%s) — troca de perfil pode não ter concluído.", papel)
 
-    print(f"[auth] Full token (length={len(token)}):\n{token}\n")
     return token, cookies

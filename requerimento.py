@@ -3,11 +3,14 @@ Submits the Atestado de Residência Fiscal requerimento to e-CAC.
 """
 
 import json
+import logging
 import re
 import time
 import httpx
 from pathlib import Path
 from config import Config
+
+log = logging.getLogger("requerimento")
 
 ENDPOINT = "https://www3.cav.receita.fazenda.gov.br/contribuinte/servicos/requerimento"
 LIST_ENDPOINT = "https://www3.cav.receita.fazenda.gov.br/contribuinte/api/requerimento/list/"
@@ -79,36 +82,18 @@ def _make_headers(token: str) -> dict:
 
 
 def submit_requerimento(token: str, cookies: dict, cfg: Config) -> dict:
-    """
-    POST the requerimento to e-CAC and return the parsed JSON response.
-    Raises httpx.HTTPStatusError on non-2xx responses.
-    """
     payload = _build_payload(cfg)
     payload_json = json.dumps(payload, ensure_ascii=False)
     files = {"requerimento": (None, payload_json, "application/json")}
 
-    print(f"[requerimento] Submitting for CNPJ {cfg.cnpj} | {cfg.data_inicial} → {cfg.data_final}")
+    log.info("Submetendo requerimento para CNPJ %s (%s → %s)...", cfg.cnpj, cfg.data_inicial, cfg.data_final)
+    log.debug("Payload: %s", payload_json)
     with httpx.Client(timeout=30, cookies=cookies) as client:
         response = client.post(ENDPOINT, headers=_make_headers(token), files=files)
 
+    log.debug("Response %d: %s", response.status_code, response.text)
     response.raise_for_status()
-    print(f"[requerimento] Response status: {response.status_code}")
     return response.json()
-
-
-def list_requerimentos(token: str, cookies: dict, cnpj: str, limit: int = 10) -> list[dict]:
-    """Fetch all requerimentos for the given CNPJ (most recent first)."""
-    cnpj_digits = re.sub(r"\D", "", cnpj)
-    params = {
-        "ni": cnpj_digits,
-        "tiporequerimento": "eletronico",
-        "offset": 0,
-        "limit": limit,
-    }
-    with httpx.Client(timeout=30, cookies=cookies) as client:
-        response = client.get(LIST_ENDPOINT, headers=_make_headers(token), params=params)
-    response.raise_for_status()
-    return response.json()["items"]
 
 
 def _get_nextjs_build_id(token: str, cookies: dict) -> str:
@@ -135,15 +120,27 @@ def get_requerimento_detail(token: str, cookies: dict, requerimento_id: str) -> 
     )
     with httpx.Client(timeout=30, cookies=cookies) as client:
         response = client.get(url, headers={**_make_headers(token), "x-nextjs-data": "1"})
+    log.debug("Detail response %d", response.status_code)
     response.raise_for_status()
     return response.json()["pageProps"]["requerimento"]
 
 
+def list_requerimentos(token: str, cookies: dict, cnpj: str, limit: int = 10) -> list[dict]:
+    """Fetch all requerimentos for the given CNPJ (most recent first)."""
+    cnpj_digits = re.sub(r"\D", "", cnpj)
+    params = {
+        "ni": cnpj_digits,
+        "tiporequerimento": "eletronico",
+        "offset": 0,
+        "limit": limit,
+    }
+    with httpx.Client(timeout=30, cookies=cookies) as client:
+        response = client.get(LIST_ENDPOINT, headers=_make_headers(token), params=params)
+    response.raise_for_status()
+    return response.json()["items"]
+
+
 def get_requerimento_status(token: str, cookies: dict, cnpj: str, protocolo: str) -> dict | None:
-    """
-    Find a specific requerimento by protocolo and return its latest status.
-    Returns None if not found.
-    """
     items = list_requerimentos(token, cookies, cnpj)
     item = next((i for i in items if i["protocolo"] == protocolo), None)
     if item is None:
@@ -173,7 +170,7 @@ def wait_for_deferido(
     Poll the requerimento list until situacao == EM_ANALISE_DEFERIDO.
     Returns the status dict when reached. Raises RuntimeError on timeout.
     """
-    print(f"[status] Polling for EM_ANALISE_DEFERIDO (interval={poll_interval}s, timeout={timeout}s)...")
+    log.info("Aguardando análise do requerimento %s...", protocolo)
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -182,7 +179,7 @@ def wait_for_deferido(
             raise RuntimeError(f"Protocolo {protocolo} not found in requerimento list.")
 
         situacao = status["situacao"]
-        print(f"[status] {protocolo} → {situacao}")
+        log.debug("Status: %s → %s", protocolo, situacao)
 
         if situacao == "EM_ANALISE_DEFERIDO":
             return status
@@ -198,7 +195,6 @@ def wait_for_deferido(
 def acknowledge_movimentacao(token: str, cookies: dict, requerimento_id: str, id_movimentacao: str) -> None:
     """
     Acknowledge the EM_ANALISE_DEFERIDO movimentacao so the PDF becomes available.
-    POST /contribuinte/servicos/requerimento/<id>/movimentacoes/internet
     """
     url = f"https://www3.cav.receita.fazenda.gov.br/contribuinte/servicos/requerimento/{requerimento_id}/movimentacoes/internet"
     headers = {
@@ -208,16 +204,12 @@ def acknowledge_movimentacao(token: str, cookies: dict, requerimento_id: str, id
     }
     payload = {"idMovimentacao": id_movimentacao}
 
-    print(f"[ack] Acknowledging movimentacao {id_movimentacao}...")
-    print(f"[ack] URL: POST {url}")
-    print(f"[ack] Headers: {json.dumps(headers, indent=2)}")
-    print(f"[ack] Cookies: {json.dumps(cookies, indent=2)}")
-    print(f"[ack] Payload: {json.dumps(payload)}")
+    log.info("Registrando ciência da movimentação...")
+    log.debug("POST %s  payload=%s", url, json.dumps(payload))
     with httpx.Client(timeout=30, cookies=cookies) as client:
         response = client.post(url, headers=headers, json=payload)
-    print(f"[ack] Response {response.status_code}: {response.text}")
+    log.debug("Response %d: %s", response.status_code, response.text)
     response.raise_for_status()
-    print(f"[ack] Acknowledged.")
 
 
 def download_pdf(
@@ -230,17 +222,15 @@ def download_pdf(
     """
     Download the Atestado PDF.
     GET /contribuinte/api/relatorios/despacho/<id>/<id_movimentacao>/
-    Saves to output_path (default: atestado_<requerimento_id>.pdf).
-    Returns the Path where the file was saved.
     """
     url = f"https://www3.cav.receita.fazenda.gov.br/contribuinte/api/relatorios/despacho/{requerimento_id}/{id_movimentacao}/"
     dest = Path(output_path or f"atestado_{requerimento_id}.pdf")
 
-    print(f"[pdf] Downloading PDF from {url}...")
+    log.info("Baixando PDF do atestado...")
+    log.debug("GET %s", url)
     with httpx.Client(timeout=60, cookies=cookies) as client:
         response = client.get(url, headers=_make_headers(token))
     response.raise_for_status()
 
     dest.write_bytes(response.content)
-    print(f"[pdf] Saved to: {dest.resolve()}")
     return dest

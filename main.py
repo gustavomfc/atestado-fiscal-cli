@@ -10,12 +10,13 @@ Usage:
         --data-final 2026-01-31 \\
         [--pais PORTUGAL] \\
         [--ocupacao "CNAE 62.04.0-00"] \\
-        [--headless]
+        [--headless] \\
+        [--verbose]
 """
 
 import argparse
 import asyncio
-import json
+import logging
 import sys
 
 from config import Config
@@ -23,7 +24,7 @@ from auth import get_auth_session
 from requerimento import submit_requerimento, wait_for_deferido, acknowledge_movimentacao, download_pdf, get_requerimento_detail
 
 
-def parse_args() -> Config:
+def parse_args() -> tuple[Config, bool]:
     parser = argparse.ArgumentParser(
         description="Solicita Atestado de Residência Fiscal na Receita Federal (e-CAC)"
     )
@@ -34,13 +35,14 @@ def parse_args() -> Config:
     parser.add_argument("--data-final",   required=True,  dest="data_final",   help="Data final (YYYY-MM-DD)")
     parser.add_argument("--pais",         default="PORTUGAL",          help="País de destino do atestado")
     parser.add_argument("--ocupacao",     default="CNAE 62.04.0-00",  help="Ocupação principal")
-    parser.add_argument("--headless",      action="store_true",         help="Rodar o browser em modo headless")
+    parser.add_argument("--headless",     action="store_true",         help="Rodar o browser em modo headless")
     parser.add_argument("--capsolver-key", default=None, dest="capsolver_key",
                         help="Capsolver API key para resolver hCaptcha automaticamente (opcional)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Exibir logs detalhados (tokens, headers, payloads)")
 
     args = parser.parse_args()
 
-    return Config(
+    cfg = Config(
         cpf=args.cpf,
         password=args.password,
         cnpj=args.cnpj,
@@ -51,50 +53,58 @@ def parse_args() -> Config:
         headless=args.headless,
         capsolver_key=args.capsolver_key,
     )
+    return cfg, args.verbose
+
+
+def setup_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+    )
+    # Silence noisy third-party loggers
+    for noisy in ("httpx", "httpcore", "asyncio", "playwright"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 async def run(cfg: Config) -> None:
-    # Step 1 & 2: browser auth + CNPJ profile switch → token + cookies
+    log = logging.getLogger("main")
+
     token, cookies = await get_auth_session(cfg.cpf, cfg.password, cfg.cnpj, headless=cfg.headless, capsolver_key=cfg.capsolver_key)
-    print(f"[main] Token obtained successfully.")
+    log.info("Autenticação concluída.")
 
-    # Step 3: submit the requerimento
     result = submit_requerimento(token, cookies, cfg)
-    print("\n=== Requerimento submetido ===")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-
     protocolo = result.get("protocolo")
+    log.info("Requerimento submetido — protocolo: %s", protocolo)
+
     if not protocolo:
-        print("[main] No protocolo in response — cannot continue.")
+        log.error("Sem protocolo na resposta — não é possível continuar.")
         return
 
-    # Step 4: poll until EM_ANALISE_DEFERIDO
     status = wait_for_deferido(token, cookies, cfg.cnpj, protocolo)
-    print("\n=== Deferido ===")
-    print(json.dumps(status, indent=2, ensure_ascii=False))
-
-    # Step 5: acknowledge the movimentacao
     requerimento_id = status["id"]
+    log.info("Requerimento deferido (id: %s).", requerimento_id)
 
-    # The list endpoint returns wrong movimentacao IDs. Fetch the full detail
-    # via the Next.js data endpoint which returns correct IDs + podeTomarCiencia flags.
     detail = get_requerimento_detail(token, cookies, requerimento_id)
     id_movimentacao = next(
         m["id"] for m in detail["movimentacoes"] if m.get("podeTomarCiencia")
     )
     acknowledge_movimentacao(token, cookies, requerimento_id, id_movimentacao)
+    log.info("Ciência registrada.")
 
-    # Step 6: download the PDF (use same movimentacao ID from detail)
     pdf_path = download_pdf(token, cookies, requerimento_id, id_movimentacao)
-    print(f"\n=== PDF salvo em: {pdf_path} ===")
+    log.info("PDF salvo em: %s", pdf_path.resolve())
 
 
 def main() -> None:
-    cfg = parse_args()
+    cfg, verbose = parse_args()
+    setup_logging(verbose)
     try:
         asyncio.run(run(cfg))
     except Exception as e:
-        print(f"\n[ERRO] {e}", file=sys.stderr)
+        logging.getLogger("main").error("Erro: %s", e)
+        if verbose:
+            raise
         sys.exit(1)
 
 
