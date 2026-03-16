@@ -89,11 +89,21 @@ async def _switch_cnpj_profile(page: Page, cnpj: str) -> None:
 
     print(f"[auth] Profile captcha triggered — waiting up to {CAPTCHA_TIMEOUT_MS // 1000}s...")
 
-    # After captcha is solved, the server redirects the browser to www3.
-    # We wait for that natural redirect — do NOT call goto() here.
-    await page.wait_for_url("**www3.cav.receita.fazenda.gov.br**", timeout=CAPTCHA_TIMEOUT_MS)
-    await page.wait_for_load_state("networkidle", timeout=20_000)
-    print(f"[auth] Profile switched — now on www3")
+    # Wait for the captcha to be solved and the switch to complete.
+    await page.wait_for_load_state("networkidle", timeout=CAPTCHA_TIMEOUT_MS)
+
+    # The switch may or may not auto-redirect to www3. Navigate there explicitly
+    # so the SISEN_TOKEN is issued in CNPJ (REPRESENTANTE_LEGAL) context.
+    # wait_until="commit" avoids ERR_ABORTED from internal www3 redirects.
+    if "www3.cav.receita.fazenda.gov.br" not in page.url:
+        print(f"[auth] Not on www3 yet ({page.url}) — navigating explicitly...")
+        try:
+            await page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
+        except Exception:
+            pass
+        await page.wait_for_load_state("networkidle", timeout=20_000)
+
+    print(f"[auth] Profile switched to CNPJ {_format_cnpj(cnpj)}")
 
 
 def _format_cnpj(cnpj: str) -> str:
