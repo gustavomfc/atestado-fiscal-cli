@@ -118,34 +118,31 @@ async def _switch_cnpj_profile(page: Page, cnpj: str) -> str | None:
 
     log.info("Resolvendo captcha do perfil (aguarde)...")
 
+    # Wait for the captcha to be solved and the switch to complete.
+    await page.wait_for_load_state("networkidle", timeout=CAPTCHA_TIMEOUT_MS)
+
+    # Give 5s for a natural www3 redirect (rare but possible).
     try:
-        await page.wait_for_url("**www3.cav.receita.fazenda.gov.br**", timeout=CAPTCHA_TIMEOUT_MS)
+        await page.wait_for_url("**www3.cav.receita.fazenda.gov.br**", timeout=5_000)
         await page.wait_for_load_state("networkidle", timeout=20_000)
         page.remove_listener("response", _on_response)
         log.debug("Profile switched via natural redirect to www3.")
         return None
-
     except Exception:
         pass
 
     page.remove_listener("response", _on_response)
 
-    if redirect_urls:
-        log.debug("Following intercepted www3 redirect...")
-        try:
-            await page.goto(redirect_urls[-1], wait_until="commit", timeout=30_000)
-        except Exception:
-            pass
-        await page.wait_for_load_state("networkidle", timeout=20_000)
-        return None
-
+    # If we intercepted a direct token from Set-Cookie, return it.
     if token_cookies:
         log.debug("Token captured from Set-Cookie.")
         return token_cookies[-1]
 
-    log.debug("No www3 redirect captured — navigating directly.")
+    # Navigate to the CNPJ profile URL — this triggers the token exchange on cav.
+    cnpj_profile_url = "https://cav.receita.fazenda.gov.br/eCAC/Aplicacao.aspx?id=10032"
+    log.debug("Navigating to CNPJ profile URL to capture token...")
     try:
-        await page.goto(ECAC_URL, wait_until="commit", timeout=30_000)
+        await page.goto(cnpj_profile_url, wait_until="commit", timeout=30_000)
     except Exception:
         pass
     await page.wait_for_load_state("networkidle", timeout=20_000)
@@ -201,6 +198,9 @@ async def get_auth_session(
     log.debug("Full token (length=%d):\n%s", len(token), token)
 
     if papel != "REPRESENTANTE_LEGAL":
-        log.warning("Token não está em contexto CNPJ (papel=%s) — troca de perfil pode não ter concluído.", papel)
+        raise RuntimeError(
+            f"Token capturado está em contexto '{papel}' (esperado: REPRESENTANTE_LEGAL). "
+            "A troca de perfil para CNPJ não foi concluída."
+        )
 
     return token, cookies
