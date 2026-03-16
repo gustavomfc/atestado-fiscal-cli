@@ -111,6 +111,34 @@ def list_requerimentos(token: str, cookies: dict, cnpj: str, limit: int = 10) ->
     return response.json()["items"]
 
 
+def _get_nextjs_build_id(token: str, cookies: dict) -> str:
+    """Extract the Next.js buildId from the requerimento list page."""
+    url = "https://www3.cav.receita.fazenda.gov.br/contribuinte/requerimento/contribuinte/"
+    with httpx.Client(timeout=30, cookies=cookies) as client:
+        response = client.get(url, headers=_make_headers(token))
+    response.raise_for_status()
+    m = re.search(r'"buildId"\s*:\s*"([^"]+)"', response.text)
+    if not m:
+        raise RuntimeError("Could not extract Next.js buildId from page.")
+    return m.group(1)
+
+
+def get_requerimento_detail(token: str, cookies: dict, requerimento_id: str) -> dict:
+    """
+    Fetch full requerimento detail via the Next.js data endpoint.
+    Returns the requerimento dict with correct movimentacao IDs and podeTomarCiencia flags.
+    """
+    build_id = _get_nextjs_build_id(token, cookies)
+    url = (
+        f"https://www3.cav.receita.fazenda.gov.br/contribuinte/_next/data/{build_id}"
+        f"/requerimento/timeline/{requerimento_id}.json?id={requerimento_id}"
+    )
+    with httpx.Client(timeout=30, cookies=cookies) as client:
+        response = client.get(url, headers={**_make_headers(token), "x-nextjs-data": "1"})
+    response.raise_for_status()
+    return response.json()["pageProps"]["requerimento"]
+
+
 def get_requerimento_status(token: str, cookies: dict, cnpj: str, protocolo: str) -> dict | None:
     """
     Find a specific requerimento by protocolo and return its latest status.
@@ -129,7 +157,7 @@ def get_requerimento_status(token: str, cookies: dict, cnpj: str, protocolo: str
         "id": item["id"],
         "situacao": ultima["tipo"] if ultima else "DESCONHECIDA",
         "ultima_movimentacao": ultima["data"] if ultima else None,
-        "movimentacoes": [{"tipo": m["tipo"], "id": m["id"], "data": m["data"]} for m in movimentacoes],
+        "movimentacoes": movimentacoes,
     }
 
 
@@ -175,6 +203,7 @@ def acknowledge_movimentacao(token: str, cookies: dict, requerimento_id: str, id
     url = f"https://www3.cav.receita.fazenda.gov.br/contribuinte/servicos/requerimento/{requerimento_id}/movimentacoes/internet"
     headers = {
         **_make_headers(token),
+        "Content-Type": "application/json",
         "Referer": f"https://www3.cav.receita.fazenda.gov.br/contribuinte/requerimento/timeline/{requerimento_id}/",
     }
     payload = {"idMovimentacao": id_movimentacao}

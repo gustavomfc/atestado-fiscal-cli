@@ -20,7 +20,7 @@ import sys
 
 from config import Config
 from auth import get_auth_session
-from requerimento import submit_requerimento, wait_for_deferido, acknowledge_movimentacao, download_pdf
+from requerimento import submit_requerimento, wait_for_deferido, acknowledge_movimentacao, download_pdf, get_requerimento_detail
 
 
 def parse_args() -> Config:
@@ -75,12 +75,16 @@ async def run(cfg: Config) -> None:
 
     # Step 5: acknowledge the movimentacao
     requerimento_id = status["id"]
+
+    # The list endpoint returns wrong movimentacao IDs. Fetch the full detail
+    # via the Next.js data endpoint which returns correct IDs + podeTomarCiencia flags.
+    detail = get_requerimento_detail(token, cookies, requerimento_id)
     id_movimentacao = next(
-        m["id"] for m in status["movimentacoes"] if m["tipo"] == "EM_ANALISE_DEFERIDO"
+        m["id"] for m in detail["movimentacoes"] if m.get("podeTomarCiencia")
     )
     acknowledge_movimentacao(token, cookies, requerimento_id, id_movimentacao)
 
-    # Step 6: download the PDF
+    # Step 6: download the PDF (use same movimentacao ID from detail)
     pdf_path = download_pdf(token, cookies, requerimento_id, id_movimentacao)
     print(f"\n=== PDF salvo em: {pdf_path} ===")
 
