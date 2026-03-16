@@ -9,6 +9,8 @@ Handles the full authentication flow:
 
 import re
 import sys
+import asyncio
+import random
 import base64
 import json as _json
 import logging
@@ -30,6 +32,28 @@ _CHROME_PATHS = {
 }
 
 _PROFILE_DIR = Path.home() / ".atestado_api" / "chrome_profile"
+
+_VIEWPORTS = [
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 900},
+    {"width": 1536, "height": 864},
+    {"width": 1280, "height": 720},
+    {"width": 1920, "height": 1080},
+]
+
+
+async def _human_delay(min_ms: int = 400, max_ms: int = 1200) -> None:
+    await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000)
+
+
+async def _move_mouse_randomly(page: Page, steps: int = 4) -> None:
+    """Drift the mouse through random positions before an interaction."""
+    vp = page.viewport_size or {"width": 1366, "height": 768}
+    for _ in range(steps):
+        x = random.randint(80, vp["width"] - 80)
+        y = random.randint(80, vp["height"] - 80)
+        await page.mouse.move(x, y)
+        await asyncio.sleep(random.uniform(0.05, 0.18))
 
 
 def _chrome_executable() -> str:
@@ -60,8 +84,11 @@ def _jwt_context(token: str) -> tuple[str, str]:
 async def _click_govbr_button(page: Page) -> None:
     log.debug("Waiting for e-CAC login page...")
     await page.wait_for_load_state("domcontentloaded")
+    await _human_delay(800, 1800)
+    await _move_mouse_randomly(page)
     govbr_btn = page.locator('input[type="image"][alt="Acesso Gov BR"]')
     await govbr_btn.wait_for(state="visible", timeout=10_000)
+    await _human_delay(300, 700)
     await govbr_btn.click()
     log.debug("Gov BR button clicked.")
 
@@ -71,12 +98,21 @@ async def _login_govbr(page: Page, cpf: str, password: str) -> None:
     await page.wait_for_url(f"**{GOVBR_SSO_HOST}**", timeout=CAPTCHA_TIMEOUT_MS)
     log.debug("Redirected to gov.br SSO.")
 
+    await _human_delay(600, 1400)
+    await _move_mouse_randomly(page)
     await page.wait_for_selector('input[name="accountId"]', timeout=10_000)
-    await page.type('input[name="accountId"]', re.sub(r"\D", "", cpf), delay=80)
+    await page.click('input[name="accountId"]')
+    await _human_delay(200, 500)
+    await page.type('input[name="accountId"]', re.sub(r"\D", "", cpf), delay=random.randint(60, 130))
+    await _human_delay(400, 900)
     await page.click('button[type="submit"]')
 
+    await _human_delay(500, 1000)
     await page.wait_for_selector('input[name="password"]', timeout=10_000)
-    await page.type('input[name="password"]', password, delay=80)
+    await page.click('input[name="password"]')
+    await _human_delay(200, 500)
+    await page.type('input[name="password"]', password, delay=random.randint(60, 130))
+    await _human_delay(400, 900)
     await page.click('button[type="submit"]')
     log.debug("Credentials submitted.")
 
@@ -172,10 +208,10 @@ async def get_auth_session(
             user_data_dir=str(_PROFILE_DIR),
             executable_path=_chrome_executable(),
             headless=headless,
-            slow_mo=150,
+            slow_mo=random.randint(120, 200),
             locale="pt-BR",
             timezone_id="America/Sao_Paulo",
-            viewport={"width": 1280, "height": 800},
+            viewport=random.choice(_VIEWPORTS),
             args=["--disable-blink-features=AutomationControlled"],
         )
         page = await context.new_page()
